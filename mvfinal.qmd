@@ -1,0 +1,707 @@
+---
+title: "Final Project"
+author: "Jacob Bowling"
+format:
+  pdf:
+    fontsize: 11pt
+    geometry: margin=1in
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(GGally)
+library(factoextra)
+library(knitr)
+library(kableExtra)
+library(randomForest)
+library(patchwork)
+
+mlb <- read_csv("C:/Users/jacob/OneDrive/Documents/mlb_2025_starts_with_streamer_category.csv", show_col_types = FALSE)
+
+mlb_clean <- mlb %>%
+  mutate(
+    game_date = mdy(game_date),
+    pitcher_name = factor(pitcher_name),
+    opponent = factor(opponent),
+    ballpark = factor(ballpark),
+    streamer_category = factor(
+      streamer_category,
+      levels = c(
+        "Do Not Start",
+        "Questionable Start",
+        "Probably Start",
+        "Auto Start"
+      )
+    )
+  ) %>%
+  arrange(pitcher_name, game_date) %>%
+  group_by(pitcher_name) %>%
+  mutate(
+    days_rest = as.numeric(game_date - lag(game_date)),
+    start_number = row_number() + 1
+  ) %>%
+  ungroup()
+
+eda_df <- mlb_clean %>%
+  filter(!is.na(fantasy_points))
+
+pca_df <- mlb_clean %>%
+  select(
+    last_start_fp,
+    season_avg_fp_prior,
+    days_rest,
+    start_number
+  ) %>%
+  drop_na()
+
+# at one point this was different from pca_df and it was easier to keep it like this than to rewrite everything
+cluster_df <- mlb_clean %>% 
+  select(
+    last_start_fp,
+    season_avg_fp_prior,
+    days_rest,
+    start_number
+  ) %>%
+  drop_na()
+
+rf_df <- mlb_clean %>%
+  select(
+    fantasy_points,
+    last_start_fp,
+    season_avg_fp_prior,
+    days_rest,
+    start_number,
+    opponent,
+    ballpark,
+    streamer_category
+  ) %>%
+  drop_na() %>%
+  mutate(
+    across(c(opponent, ballpark, streamer_category), as.factor)
+  )
+```
+
+# Data Description
+
+This dataset contains MLB pitcher-start data from the 2025 season. Each row represents one pitcher start from the 2025 MLB season. The response variable is fantasy points for that start, while the main predictors include PitcherList streamer category, prior fantasy performance, opponent, ballpark, days of rest, and start number. Since the analysis focuses on predicting single-start fantasy outcomes using information available before the start, each pitcher’s first start of the season was excluded because prior-start information was not yet available.
+
+# EDA
+
+## Basic Data Preview
+
+```{r}
+eda_summary <- eda_df %>%
+  summarise(
+    n = n(),
+    mean_fp = mean(fantasy_points),
+    sd_fp = sd(fantasy_points),
+    min_fp = min(fantasy_points),
+    max_fp = max(fantasy_points),
+    mean_last_start = mean(last_start_fp, na.rm = TRUE),
+    mean_prior_avg = mean(season_avg_fp_prior, na.rm = TRUE),
+    mean_days_rest = mean(days_rest, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+kable(
+  eda_summary,
+  booktabs = TRUE,
+  align = rep("c", ncol(eda_summary))
+) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Summary Statistics" = ncol(eda_summary)))
+```
+
+Fantasy point outcomes vary widely, with a large range and high std relative to the mean.
+
+## Correlation
+
+```{r}
+corr_table <- pca_df %>%
+  cor(use = "complete.obs") %>%
+  round(3)
+
+kable(
+  corr_table,
+  booktabs = TRUE,
+  align = rep("c", ncol(corr_table))
+) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Correlation Matrix for Numeric Predictors" = 5))
+```
+
+The strongest relationship is between last-start fantasy points and prior season average fantasy points, indicating a moderate association. All other correlations are weak, suggesting that rest and timing variables capture different aspects of pitcher usage. Overall, the low correlations indicate limited multicollinearity and support using these predictors in later analyses.
+
+## PitcherList Streamer Category
+
+```{r}
+streamer_summary <- eda_df %>%
+  group_by(streamer_category) %>%
+  summarise(
+    n = n(),
+    mean_fp = mean(fantasy_points),
+    sd_fp = sd(fantasy_points),
+    min_fp = min(fantasy_points),
+    max_fp = max(fantasy_points),
+    median_fp = median(fantasy_points),
+    mean_prior_avg = mean(season_avg_fp_prior, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+kable(
+  streamer_summary,
+  booktabs = TRUE,
+  align = rep("c", ncol(streamer_summary))
+) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Fantasy Points by Streamer Category" = ncol(streamer_summary)))
+```
+
+```{r}
+#| fig-width: 6
+#| fig-height: 2.5
+#| fig-align: center
+
+ggplot(eda_df, aes(x = streamer_category, y = fantasy_points)) +
+  geom_boxplot() +
+  labs(
+    x = "Streamer Category",
+    y = "Fantasy Points"
+  ) +
+  theme_classic()
+```
+
+The streamer categories generally move in the expected direction, with Auto Start pitchers having the highest median fantasy points and Do Not Start pitchers having the lowest. (The NA category is likely due to their start being postponed). The large overlap between categories shows that expert classifications provide useful signal but do not fully separate good and bad outcomes.
+
+## Prior Performance
+
+```{r}
+#| fig-width: 5
+#| fig-height: 2.25
+#| fig-align: center
+
+ggplot(eda_df, aes(x = season_avg_fp_prior, y = fantasy_points)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    x = "Prior Season Average Fantasy Points",
+    y = "Fantasy Points"
+  ) +
+  theme_classic()
+```
+
+Prior season average fantasy points has a positive relationship with actual fantasy points, but the points remain widely scattered. This suggests that prior performance matters, while single-start outcomes still contain substantial randomness.
+
+## Opponent & Ballpark
+
+```{r}
+team_records <- tribble(
+  ~opponent, ~wins, ~losses,
+  "MIL", 97, 65,
+  "PHI", 96, 66,
+  "NYY", 94, 68,
+  "TOR", 94, 68,
+  "LAD", 93, 69,
+  "CHC", 92, 70,
+  "SDP", 90, 72,
+  "BOS", 89, 73,
+  "HOU", 88, 74,
+  "SEA", 87, 75,
+  "CLE", 86, 76,
+  "SFG", 81, 81,
+  "ARI", 80, 82,
+  "CIN", 83, 79,
+  "NYM", 83, 79,
+  "MIN", 82, 80,
+  "STL", 78, 84,
+  "TEX", 82, 80,
+  "DET", 79, 83,
+  "MIA", 79, 83,
+  "ATL", 76, 86,
+  "BAL", 75, 87,
+  "TBR", 77, 85,
+  "KCR", 76, 86,
+  "LAA", 68, 94,
+  "WSN", 66, 96,
+  "OAK", 65, 97,
+  "CHW", 60, 102,
+  "PIT", 71, 91,
+  "COL", 43, 119
+) %>%
+  mutate(win_pct = scales::percent(wins / (wins + losses),
+      accuracy = 0.1))
+```
+
+```{r}
+#| results: asis
+
+opponent_summary <- eda_df %>%
+  group_by(opponent) %>%
+  summarise(
+    mean_fp = round(mean(fantasy_points), 2),
+    median_fp = round(median(fantasy_points), 0),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(team_records, by = "opponent") %>%
+  select(opponent, win_pct, mean_fp, median_fp, n) %>%
+  rename(team = opponent) %>%
+  arrange(desc(mean_fp))
+
+top5_opp <- opponent_summary %>% slice_head(n = 5)
+bottom5_opp <- opponent_summary %>% slice_tail(n = 5)  %>% arrange(mean_fp)
+
+cat("\\begin{minipage}{0.48\\linewidth}
+\\centering
+\\textbf{Worst Opponents}\\\\[4pt]
+{\\small
+")
+
+print(kable(top5_opp, format = "latex", booktabs = TRUE))
+
+cat("}
+\\end{minipage}
+\\hspace{0.03\\linewidth}
+\\begin{minipage}{0.48\\linewidth}
+\\centering
+\\textbf{Best Opponents}\\\\[4pt]
+{\\small
+")
+
+print(kable(bottom5_opp, format = "latex", booktabs = TRUE))
+
+cat("}
+\\end{minipage}")
+```
+
+```{r}
+#| results: asis
+
+ballpark_summary <- eda_df %>%
+  group_by(ballpark) %>%
+  summarise(
+    mean_fp = round(mean(fantasy_points), 2),
+    median_fp = round(median(fantasy_points), 0),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_fp))
+
+top5_park <- ballpark_summary %>% slice_head(n = 5)
+bottom5_park <- ballpark_summary %>% slice_tail(n = 5) %>% arrange(mean_fp)
+
+cat("\\begin{minipage}{0.48\\textwidth}
+\\centering
+\\textbf{Most Pitcher-Friendly Ballparks}\\\\[4pt]
+")
+
+print(
+  kable(top5_park, format = "latex", booktabs = TRUE)
+)
+
+cat("\\end{minipage}
+\\hfill
+\\begin{minipage}{0.48\\textwidth}
+\\centering
+\\textbf{Least Pitcher-Friendly Ballparks}\\\\[4pt]
+")
+
+print(
+  kable(bottom5_park, format = "latex", booktabs = TRUE)
+)
+
+cat("\\end{minipage}")
+```
+
+Certain opponents/ballparks are clearly better/worse. Interestingly not all of the "worst opponents" were "bad teams" by record.
+
+# PCA
+
+## Assessment of Multivariate Normality
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4.5
+
+p_pairs <- ggpairs(
+  pca_df,
+  progress = FALSE,
+  lower = list(continuous = wrap("points", alpha = 0.35, size = 0.5)),
+  upper = list(continuous = wrap("cor", size = 3)),
+  diag  = list(continuous = wrap("densityDiag", alpha = 0.4))
+)
+
+pairs_grob <- GGally::ggmatrix_gtable(p_pairs)
+p_pairs_wrapped <- patchwork::wrap_elements(full = pairs_grob)
+
+pca_long <- pca_df %>%
+  pivot_longer(everything(), names_to = "var", values_to = "value")
+
+p_qq_uni <- ggplot(pca_long, aes(sample = value)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~var, scales = "free") +
+  labs(title = "Univariate Q-Q Plots")
+
+S <- cov(pca_df)
+xbar <- colMeans(pca_df)
+d2 <- mahalanobis(pca_df, center = xbar, cov = S)
+
+theo <- qchisq(ppoints(length(d2)), df = ncol(pca_df))
+obs  <- sort(d2)
+
+p_qq_chi <- ggplot(tibble(theo = theo, obs = obs), aes(theo, obs)) +
+  geom_point(alpha = 0.7, size = 1) +
+  geom_abline(intercept = 0, slope = 1) +
+  labs(
+    title = expression(chi^2 ~ "Q-Q"),
+    x = expression(chi^2 ~ Quantiles),
+    y = "Ordered Distances"
+  )
+
+p_pairs_wrapped / (p_qq_uni | p_qq_chi) +
+  plot_layout(heights = c(2, 1))
+```
+
+Multivariate normality was assessed using pairwise scatterplots, univariate Q–Q plots, and a $\chi^2$ Q–Q plot. The **scatterplot matrix** shows a moderate positive relationship between last start fantasy points and prior season average fantasy points, while other relationships appear weak. The **univariate Q–Q plots** indicate departures from normality, particularly for days of rest, which is strongly right-skewed, and start number, which also has deviation. The $\chi^2$ **Q–Q plot** exhibits substantial upward deviation in the upper tail, indicating heavier-than-normal tails and potential outliers. The assumption of multivariate normality is not satisfied.
+
+## Principal Component Analysis
+
+```{r}
+pca_fit <- prcomp(pca_df, center = TRUE, scale. = TRUE)
+```
+
+Because the variables are measured in different units, they were standardized prior to analysis, as recommended when scale differences may otherwise dominate the first principal component.
+
+## Eigenvalue Table
+
+```{r}
+eig_vals <- pca_fit$sdev^2
+prop_var <- eig_vals / sum(eig_vals)
+cum_var <- cumsum(prop_var)
+
+var_table <- tibble(
+  PC = paste0("PC", 1:length(eig_vals)),
+  Eigenvalue = eig_vals,
+  Proportion = prop_var,
+  Cumulative = cum_var
+)
+
+kable(var_table, digits = 3)
+```
+
+The first three principal components explain 86.5% of the total variation in the four numeric variables. PC1 explains 37.6%, PC2 explains 26.1%, and PC3 explains 22.8%. Since these three components preserve most of the original information, the first three components are retained for interpretation.
+
+## Loadings
+
+```{r}
+loadings <- pca_fit$rotation
+kable(loadings[, 1:3], digits = 3)
+```
+
+**PC1** has large negative loadings for last_start_fp and season_avg_fp_prior, so it mainly represents prior pitcher performance. More negative PC1 values correspond to stronger recent and season-level performance. **PC2** is characterized by a strong positive loading for start_number and a negative loading for days_rest. This component primarily contrasts later-season starts with more typical rest patterns against earlier or irregularly spaced starts with longer rest intervals. **PC3** has large positive loadings for both days_rest and start_number, indicating that it captures variation related to the timing and spacing of starts. In particular, higher PC3 values correspond to starts that occur later in the season and involve longer rest periods, suggesting less typical scheduling patterns (or return from injury).
+
+## Score Plot
+
+```{r}
+#| fig-width: 4
+#| fig-height: 2
+#| fig-align: center
+
+scores <- as.data.frame(pca_fit$x)
+
+ggplot(scores, aes(x = PC1, y = PC2, color = PC3)) +
+  geom_point(alpha = 0.7) +
+  scale_color_viridis_c() +
+  labs(
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    color = "PC3"
+  ) +
+  theme_minimal()
+```
+
+The score plot displays the first two principal components, with color representing values of the third principal component. Most observations are concentrated in the upper-left region of the plot, indicating that the majority of pitcher starts have relatively similar combinations of prior-performance and timing characteristics, corresponding to lower PC1 values and slightly higher PC2 values. A smaller set of observations extends away from this cluster, particularly toward higher PC1 and lower PC2 values, with lighter colors indicating higher PC3 values. These points represent less typical starts, especially those involving longer rest periods and later-season appearances (probably due to injuries). Overall, the plot suggests continuous variation rather than distinct clusters.
+
+# K-Means Clustering
+
+## Elbow Plot
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+cluster_scaled <- scale(cluster_df)
+
+set.seed(0827)
+
+k_list <- vector("list", 8)
+
+for(k in 1:8){
+  k_list[[k]] <- kmeans(cluster_scaled, centers = k, nstart = 50)
+}
+
+twcss <- sapply(k_list, function(x) x$tot.withinss)
+
+plot(1:8, twcss,
+     type = "b",
+     xlab = "Number of Clusters",
+     ylab = "Total Within-Cluster SS")
+```
+
+The elbow plot shows substantial reductions in within-cluster variation when increasing the number of clusters from one to two and from two to three. A further decrease is observed when moving to four clusters, after which the rate of improvement diminishes. Therefore, a four-cluster solution was selected to capture additional structure in the data while maintaining a relatively simple clustering model.
+
+## Cluster Means
+
+```{r}
+set.seed(0827)
+
+mlb_kmeans <- kmeans(
+  cluster_scaled,
+  centers = 4,
+  nstart = 50,
+  iter.max = 200
+)
+```
+
+```{r}
+mlb_cluster_means <-
+  mlb_clean %>%
+  select(
+    fantasy_points,
+    last_start_fp,
+    season_avg_fp_prior,
+    days_rest,
+    start_number
+  ) %>%
+  drop_na() %>%
+  mutate(cluster = mlb_kmeans$cluster) %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), mean)) %>%
+  rename(mean_fp = fantasy_points) %>%
+  mutate(across(-cluster, ~round(., 3)))
+
+kable(mlb_cluster_means, booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("K-Means Cluster Means" = 6))
+```
+
+This identifies distinct groups of pitcher starts based on prior performance and timing characteristics. **Cluster 3** has the highest average fantasy points and is characterized by strong recent performance and high prior season averages, indicating consistently high-performing pitchers. **Cluster 1** represents more typical starts, with values near the overall mean across all variables. **Clusters 2 and 4** are associated with lower average fantasy point outcomes. **Cluster 2** consists of starts with weaker recent and prior performance but otherwise typical rest patterns. **Cluster 4** is distinguished by extremely high days of rest, suggesting irregular scheduling (potentially due to returning from injury), and also exhibits lower fantasy point production. Clusters were created from pre-start characteristics and then evaluated using actual fantasy outcomes. While the clusters capture differences in prior performance and scheduling patterns, they interestingly do not show as strong of a separation in terms of fantasy point outcomes as one would expect.
+
+# Hierarchical Clustering
+
+## Linkage Choice
+
+```{r}
+#| fig-width: 6
+#| fig-height: 2.5
+
+set.seed(0827)
+
+sample_idx <- sample(nrow(cluster_scaled), 500)
+cluster_sample <- cluster_scaled[sample_idx, ]
+
+dist_cluster <- dist(cluster_sample)
+
+hc_single   <- hclust(dist_cluster, method = "single")
+hc_complete <- hclust(dist_cluster, method = "complete")
+hc_average  <- hclust(dist_cluster, method = "average")
+
+par(mfrow = c(1,3))
+
+plot(hc_single,   main = "Single Linkage",   xlab = "", sub = "")
+plot(hc_complete, main = "Complete Linkage", xlab = "", sub = "")
+plot(hc_average,  main = "Average Linkage",  xlab = "", sub = "")
+```
+
+Hierarchical clustering was performed using single, complete, and average linkage methods. The single linkage dendrogram exhibits strong chaining behavior, with observations merging gradually and little clear separation between groups. Average linkage provides some improvement, but clusters remain relatively compressed with limited vertical separation. Complete linkage produces more distinct cluster structure, with larger vertical gaps between merges and clearer separation among groups. Therefore, complete linkage was selected for further analysis.
+
+## Cluster Means
+
+```{r}
+hc_clusters <- cutree(hc_complete, 4)
+
+mlb_hc_means <-
+  mlb_clean %>%
+  select(
+    fantasy_points,
+    last_start_fp,
+    season_avg_fp_prior,
+    days_rest,
+    start_number
+  ) %>%
+  drop_na() %>%
+  slice(sample_idx) %>%
+  mutate(cluster = hc_clusters) %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), mean)) %>%
+  rename(mean_fp = fantasy_points) %>%
+  mutate(across(-cluster, ~round(., 3)))
+```
+
+```{r}
+kable(mlb_hc_means,
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Hierarchical Cluster Means" = 6))
+```
+
+This identifies distinct groups of pitcher starts based on prior performance and timing characteristics. **Cluster 2** stands out with the highest average fantasy point outcomes and reflects consistently strong recent and overall performance. **Cluster 1** represents more typical starts, with values closer to the overall average. **Clusters 3 and 4** are distinguished by extremely high rest periods, indicating irregular scheduling (potentially due to returning from injury). Despite these differences, both clusters do not show substantially different fantasy point outcomes than the others. Clusters were created from pre-start characteristics and then evaluated using actual fantasy outcomes. Again, the clusters capture differences in performance and timing patterns, but they do not show strong separation in terms of fantasy point outcomes.
+
+## Comparison
+
+The k-means and hierarchical clustering solutions both identify groups of pitcher starts based on prior performance and timing patterns. However, the k-means solution provides a more interpretable separation between groups. In particular, it distinguishes starts with strong prior performance, weaker prior performance, typical starts, and irregular long-rest starts. Because of this k-means is preferred for describing pitcher-start profiles.
+
+# PCA/Clustering Visual
+
+```{r}
+#| fig-width: 5
+#| fig-height: 2.25
+#| fig-align: center
+
+cluster_scores <- as.data.frame(pca_fit$x) %>%
+  mutate(cluster = factor(mlb_kmeans$cluster))
+
+ggplot(cluster_scores, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.5, size = 2.2) +
+  labs(
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+The k-means clusters are visualized using the first two principal components here. The clusters generally align with the structure identified in the PCA, as observations that are close together in the principal component space tend to belong to the same cluster. One cluster is clearly separated from the others, while the remaining clusters are more tightly grouped and show some overlap. The visualization reinforces that both PCA and clustering are capturing similar underlying patterns in the data (even though the separation between groups is not especially strong).
+
+# Random Forest
+
+```{r}
+set.seed(0827)
+
+train <- sample(1:nrow(rf_df), floor(0.7 * nrow(rf_df)))
+
+train_data <- rf_df[train, ]
+test_data  <- rf_df[-train, ]
+test_y <- test_data$fantasy_points
+
+p <- ncol(train_data) - 1
+```
+
+```{r}
+set.seed(0827)
+
+bag_fit <- randomForest(
+  fantasy_points ~ .,
+  data = train_data,
+  mtry = p,
+  ntree = 500,
+  importance = TRUE
+)
+
+bag_pred <- predict(bag_fit, newdata = test_data)
+bag_mse <- mean((bag_pred - test_y)^2)
+
+mtry_vals <- 1:(p - 1)
+rf_mse_vals <- numeric(length(mtry_vals))
+rf_fits <- vector("list", length(mtry_vals))
+
+for (i in seq_along(mtry_vals)) {
+  rf_fits[[i]] <- randomForest(
+    fantasy_points ~ .,
+    data = train_data,
+    mtry = mtry_vals[i],
+    ntree = 500,
+    importance = TRUE
+  )
+
+  rf_pred_i <- predict(rf_fits[[i]], newdata = test_data)
+  rf_mse_vals[i] <- mean((rf_pred_i - test_y)^2)
+}
+```
+
+## Results
+
+```{r}
+results_tbl <- tibble(
+  Model = c("Bagging", rep("Random Forest", length(mtry_vals))),
+  mtry = c(p, mtry_vals),
+  ntree = 500,
+  Test_MSE = c(bag_mse, rf_mse_vals)
+) %>%
+  arrange(Test_MSE) %>%
+  mutate(Test_MSE = round(Test_MSE, 3))
+
+kable(results_tbl, booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Model Comparison" = 4))
+```
+
+The random forest with mtry = 1 produced the lowest test-set mean squared error, making it the best-performing model among those considered. As mtry increases, the test-set MSE increases slightly, indicating that using fewer predictors at each split leads to marginally better performance. Bagging, which uses all predictors, resulted in the highest test-set MSE. However, the differences in test error across models are relatively small, suggesting that while limiting predictors improves performance, the overall predictive gains are modest.
+
+## Variable Importance
+
+```{r}
+best_mtry <- results_tbl %>%
+  filter(Model == "Random Forest") %>%
+  slice(1) %>%
+  pull(mtry)
+
+rf_final <- rf_fits[[which(mtry_vals == best_mtry)]]
+
+var_imp_tbl <- as.data.frame(importance(rf_final))
+var_imp_tbl$Predictor <- rownames(var_imp_tbl)
+
+var_imp_tbl <- var_imp_tbl %>%
+  as_tibble() %>%
+  select(Predictor, `%IncMSE`, IncNodePurity) %>%
+  arrange(desc(`%IncMSE`)) %>%
+  mutate(
+    `%IncMSE` = round(`%IncMSE`, 3),
+    IncNodePurity = round(IncNodePurity, 3)
+  )
+
+kable(var_imp_tbl, booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  add_header_above(c("Variable Importance" = 3))
+```
+
+Variable importance was assessed using percent increase in mean squared error. The most important predictor was streamer category. Prior season average fantasy points was the second most important predictor, suggesting that overall previous performance was more useful than performance in only the most recent start. Opponent and ballpark also contributed to predictive accuracy, indicating that matchup and environment matter, but their effects were smaller than streamer category and prior performance. Days of rest and start number were the least important predictors, suggesting that scheduling variables added less predictive value in this model.
+
+## Predicted vs. Observed Plot
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4
+
+final_pred <- predict(rf_final, newdata = test_data)
+
+plot(
+  final_pred, test_y,
+  xlab = "Predicted Fantasy Points",
+  ylab = "Observed Fantasy Points"
+)
+abline(0, 1)
+```
+
+The predicted vs. observed plot shows a positive relationship, but predictions are compressed into a narrow range while actual values vary widely. This indicates regression to the mean, with high outcomes underpredicted and low outcomes overpredicted. The model captures some signal but leaves substantial unexplained variation.
+
+# Conclusion
+
+This analysis shows how pre-start characteristics relate to fantasy point outcomes using PCA, clustering, and random forests. The exploratory analysis showed moderate relationships between prior performance measures and fantasy outcomes, along with substantial variability across observations. PCA showed that most variation in the data could be explained by prior performance and timing patterns, while clustering methods identified groups of starts with similar profiles. However, both k-means and hierarchical clustering showed only limited separation in actual fantasy outcomes. The random forest model provided some predictive improvement and identified streamer category and prior performance as the most important predictors. Despite this, the predicted versus observed results showed substantial unexplained variation, indicating that even with multiple variables and nonlinear modeling, performance remains difficult to predict. These results suggest that while pre-start information and expert classifications provide useful signal, they have limited ability to fully explain or predict fantasy performance, highlighting the inherent variability in pitcher outcomes.
+
+# References
+
+Pendles, J. (2026). *2025 MLB Streaming Statistics*. Kaggle.\
+     https://www.kaggle.com/datasets/jabrwocky/2025-mlb-streaming-statistics
