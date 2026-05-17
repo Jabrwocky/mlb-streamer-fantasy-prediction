@@ -42,8 +42,6 @@ A random forest model was used to predict fantasy points from the available star
 
 - report.pdf — Final written report with analysis, tables, and plots
 - analysis.qmd — Quarto source file used to generate the report
-- data/ — Data files used for the project, if shareable
-- figures/ — Exported plots or report visuals, if included
 
 ## Notes
 
