@@ -13,23 +13,43 @@ editor: visual
 ---
 
 ```{r}
+# Load core tidyverse tools for data cleaning, summarizing, and plotting.
 library(tidyverse)
+
+# Load lubridate so game dates can be parsed from character strings.
 library(lubridate)
+
+# Load GGally for the scatterplot matrix used in the multivariate normality check.
 library(GGally)
+
+# Load factoextra for possible PCA/clustering support and visualization utilities.
 library(factoextra)
+
+# Load knitr and kableExtra to create formatted tables in the PDF.
 library(knitr)
 library(kableExtra)
+
+# Load randomForest for the bagging and random forest prediction models.
 library(randomForest)
+
+# Load patchwork to combine multiple plots into one figure.
 library(patchwork)
 
+# Read in the pitcher-start dataset from the local CSV file.
 mlb <- read_csv("C:/Users/jacob/OneDrive/Documents/mlb_2025_starts_with_streamer_category.csv", show_col_types = FALSE)
 
+# Clean and prepare the main dataset for analysis.
 mlb_clean <- mlb %>%
   mutate(
+    # Convert the game date into an actual Date object.
     game_date = mdy(game_date),
+
+    # Treat pitcher, opponent, and ballpark as categorical variables.
     pitcher_name = factor(pitcher_name),
     opponent = factor(opponent),
     ballpark = factor(ballpark),
+
+    # Convert streamer category to an ordered factor based on start confidence.
     streamer_category = factor(
       streamer_category,
       levels = c(
@@ -40,17 +60,23 @@ mlb_clean <- mlb %>%
       )
     )
   ) %>%
+  # Sort each pitcher's starts chronologically before calculating rest/start order.
   arrange(pitcher_name, game_date) %>%
   group_by(pitcher_name) %>%
   mutate(
+    # Calculate days since the pitcher's previous start.
     days_rest = as.numeric(game_date - lag(game_date)),
+
+    # Create a within-pitcher start counter.
     start_number = row_number() + 1
   ) %>%
   ungroup()
 
+# Keep only rows with observed fantasy points for EDA.
 eda_df <- mlb_clean %>%
   filter(!is.na(fantasy_points))
 
+# Create the numeric dataset used for PCA.
 pca_df <- mlb_clean %>%
   select(
     last_start_fp,
@@ -61,6 +87,7 @@ pca_df <- mlb_clean %>%
   drop_na()
 
 # at one point this was different from pca_df and it was easier to keep it like this than to rewrite everything
+# Create the numeric dataset used for clustering.
 cluster_df <- mlb_clean %>% 
   select(
     last_start_fp,
@@ -70,6 +97,7 @@ cluster_df <- mlb_clean %>%
   ) %>%
   drop_na()
 
+# Create the modeling dataset for random forest prediction.
 rf_df <- mlb_clean %>%
   select(
     fantasy_points,
@@ -81,8 +109,10 @@ rf_df <- mlb_clean %>%
     ballpark,
     streamer_category
   ) %>%
+  # Remove rows with missing values in the response or predictors.
   drop_na() %>%
   mutate(
+    # Make sure categorical predictors are treated as factors by the model.
     across(c(opponent, ballpark, streamer_category), as.factor)
   )
 ```
@@ -96,19 +126,27 @@ This dataset contains MLB pitcher-start data from the 2025 season. Each row repr
 ## Basic Data Preview
 
 ```{r}
+# Summarize the main fantasy-point outcome and key numeric predictors.
 eda_summary <- eda_df %>%
   summarise(
+    # Number of pitcher starts included in the EDA dataset.
     n = n(),
+
+    # Basic distribution of fantasy-point outcomes.
     mean_fp = mean(fantasy_points),
     sd_fp = sd(fantasy_points),
     min_fp = min(fantasy_points),
     max_fp = max(fantasy_points),
+
+    # Average values for the main pre-start numeric predictors.
     mean_last_start = mean(last_start_fp, na.rm = TRUE),
     mean_prior_avg = mean(season_avg_fp_prior, na.rm = TRUE),
     mean_days_rest = mean(days_rest, na.rm = TRUE)
   ) %>%
+  # Round numeric values so the table is easier to read.
   mutate(across(where(is.numeric), ~round(., 3)))
 
+# Print the summary statistics table.
 kable(
   eda_summary,
   booktabs = TRUE,
@@ -123,10 +161,12 @@ Fantasy point outcomes vary widely, with a large range and high std relative to 
 ## Correlation
 
 ```{r}
+# Compute the correlation matrix for the numeric predictors used in PCA.
 corr_table <- pca_df %>%
   cor(use = "complete.obs") %>%
   round(3)
 
+# Print the correlation matrix as a formatted table.
 kable(
   corr_table,
   booktabs = TRUE,
@@ -141,20 +181,28 @@ The strongest relationship is between last-start fantasy points and prior season
 ## PitcherList Streamer Category
 
 ```{r}
+# Summarize fantasy-point outcomes within each PitcherList streamer category.
 streamer_summary <- eda_df %>%
   group_by(streamer_category) %>%
   summarise(
+    # Count the number of starts in each category.
     n = n(),
+
+    # Summarize the distribution of fantasy points by category.
     mean_fp = mean(fantasy_points),
     sd_fp = sd(fantasy_points),
     min_fp = min(fantasy_points),
     max_fp = max(fantasy_points),
     median_fp = median(fantasy_points),
+
+    # Include prior performance to compare category strength with past production.
     mean_prior_avg = mean(season_avg_fp_prior, na.rm = TRUE),
     .groups = "drop"
   ) %>%
+  # Round numeric values for table readability.
   mutate(across(where(is.numeric), ~round(., 3)))
 
+# Print the category summary table.
 kable(
   streamer_summary,
   booktabs = TRUE,
@@ -169,7 +217,9 @@ kable(
 #| fig-height: 2.5
 #| fig-align: center
 
+# Create a boxplot comparing fantasy points across streamer categories.
 ggplot(eda_df, aes(x = streamer_category, y = fantasy_points)) +
+  # Show the spread and median fantasy points within each category.
   geom_boxplot() +
   labs(
     x = "Streamer Category",
@@ -187,8 +237,11 @@ The streamer categories generally move in the expected direction, with Auto Star
 #| fig-height: 2.25
 #| fig-align: center
 
+# Plot prior average fantasy points against actual fantasy points for the start.
 ggplot(eda_df, aes(x = season_avg_fp_prior, y = fantasy_points)) +
+  # Add individual pitcher-start observations.
   geom_point(alpha = 0.4) +
+  # Add a linear trend line to show the overall relationship.
   geom_smooth(method = "lm", se = FALSE) +
   labs(
     x = "Prior Season Average Fantasy Points",
@@ -202,6 +255,7 @@ Prior season average fantasy points has a positive relationship with actual fant
 ## Opponent & Ballpark
 
 ```{r}
+# Manually enter final team records so opponent quality can be shown alongside fantasy outcomes.
 team_records <- tribble(
   ~opponent, ~wins, ~losses,
   "MIL", 97, 65,
@@ -235,6 +289,7 @@ team_records <- tribble(
   "PIT", 71, 91,
   "COL", 43, 119
 ) %>%
+# Convert wins and losses into a formatted winning percentage.
   mutate(win_pct = scales::percent(wins / (wins + losses),
       accuracy = 0.1))
 ```
@@ -242,6 +297,7 @@ team_records <- tribble(
 ```{r}
 #| results: asis
 
+# Summarize fantasy outcomes by opponent.
 opponent_summary <- eda_df %>%
   group_by(opponent) %>%
   summarise(
@@ -255,7 +311,9 @@ opponent_summary <- eda_df %>%
   rename(team = opponent) %>%
   arrange(desc(mean_fp))
 
+# Identify opponents associated with the highest average pitcher fantasy points.
 top5_opp <- opponent_summary %>% slice_head(n = 5)
+# Identify opponents associated with the lowest average pitcher fantasy points.
 bottom5_opp <- opponent_summary %>% slice_tail(n = 5)  %>% arrange(mean_fp)
 
 cat("\\begin{minipage}{0.48\\linewidth}
@@ -284,6 +342,7 @@ cat("}
 ```{r}
 #| results: asis
 
+# Summarize fantasy outcomes by ballpark.
 ballpark_summary <- eda_df %>%
   group_by(ballpark) %>%
   summarise(
@@ -294,7 +353,9 @@ ballpark_summary <- eda_df %>%
   ) %>%
   arrange(desc(mean_fp))
 
+# Identify ballparks associated with the highest average pitcher fantasy points.
 top5_park <- ballpark_summary %>% slice_head(n = 5)
+# Identify ballparks associated with the lowest average pitcher fantasy points.
 bottom5_park <- ballpark_summary %>% slice_tail(n = 5) %>% arrange(mean_fp)
 
 cat("\\begin{minipage}{0.48\\textwidth}
@@ -330,6 +391,7 @@ Certain opponents/ballparks are clearly better/worse. Interestingly not all of t
 #| fig-width: 10
 #| fig-height: 4.5
 
+# Create a scatterplot matrix to inspect pairwise relationships and marginal distributions.
 p_pairs <- ggpairs(
   pca_df,
   progress = FALSE,
@@ -338,25 +400,32 @@ p_pairs <- ggpairs(
   diag  = list(continuous = wrap("densityDiag", alpha = 0.4))
 )
 
+# Convert the GGally object into a grob so it can be combined with patchwork.
 pairs_grob <- GGally::ggmatrix_gtable(p_pairs)
 p_pairs_wrapped <- patchwork::wrap_elements(full = pairs_grob)
 
+# Reshape the PCA variables to build separate univariate Q-Q plots.
 pca_long <- pca_df %>%
   pivot_longer(everything(), names_to = "var", values_to = "value")
 
+# Create univariate Q-Q plots for each numeric variable.
 p_qq_uni <- ggplot(pca_long, aes(sample = value)) +
   stat_qq() +
   stat_qq_line() +
   facet_wrap(~var, scales = "free") +
   labs(title = "Univariate Q-Q Plots")
 
+# Compute the covariance matrix and mean vector for Mahalanobis distances.
 S <- cov(pca_df)
 xbar <- colMeans(pca_df)
+# Calculate squared Mahalanobis distances for the multivariate normality check.
 d2 <- mahalanobis(pca_df, center = xbar, cov = S)
 
+# Create theoretical chi-square quantiles and ordered observed distances.
 theo <- qchisq(ppoints(length(d2)), df = ncol(pca_df))
 obs  <- sort(d2)
 
+# Plot observed Mahalanobis distances against chi-square quantiles.
 p_qq_chi <- ggplot(tibble(theo = theo, obs = obs), aes(theo, obs)) +
   geom_point(alpha = 0.7, size = 1) +
   geom_abline(intercept = 0, slope = 1) +
@@ -366,6 +435,7 @@ p_qq_chi <- ggplot(tibble(theo = theo, obs = obs), aes(theo, obs)) +
     y = "Ordered Distances"
   )
 
+# Combine the scatterplot matrix and Q-Q plots into one diagnostic figure.
 p_pairs_wrapped / (p_qq_uni | p_qq_chi) +
   plot_layout(heights = c(2, 1))
 ```
@@ -375,6 +445,7 @@ Multivariate normality was assessed using pairwise scatterplots, univariate Q–
 ## Principal Component Analysis
 
 ```{r}
+# Fit PCA using centered and scaled numeric predictors.
 pca_fit <- prcomp(pca_df, center = TRUE, scale. = TRUE)
 ```
 
@@ -383,10 +454,14 @@ Because the variables are measured in different units, they were standardized pr
 ## Eigenvalue Table
 
 ```{r}
+# Extract eigenvalues from the PCA object.
 eig_vals <- pca_fit$sdev^2
+# Calculate the proportion of variance explained by each component.
 prop_var <- eig_vals / sum(eig_vals)
+# Calculate cumulative variance explained.
 cum_var <- cumsum(prop_var)
 
+# Build a table summarizing eigenvalues and explained variance.
 var_table <- tibble(
   PC = paste0("PC", 1:length(eig_vals)),
   Eigenvalue = eig_vals,
@@ -394,6 +469,7 @@ var_table <- tibble(
   Cumulative = cum_var
 )
 
+# Print the eigenvalue/explained-variance table.
 kable(var_table, digits = 3)
 ```
 
@@ -402,7 +478,9 @@ The first three principal components explain 86.5% of the total variation in the
 ## Loadings
 
 ```{r}
+# Extract the PCA loading matrix.
 loadings <- pca_fit$rotation
+# Print the loadings for the first three principal components.
 kable(loadings[, 1:3], digits = 3)
 ```
 
@@ -415,10 +493,14 @@ kable(loadings[, 1:3], digits = 3)
 #| fig-height: 2
 #| fig-align: center
 
+# Convert PCA scores to a data frame for plotting.
 scores <- as.data.frame(pca_fit$x)
 
+# Plot PC1 vs. PC2 and color points by PC3.
 ggplot(scores, aes(x = PC1, y = PC2, color = PC3)) +
+  # Add one point for each pitcher start.
   geom_point(alpha = 0.7) +
+  # Use a continuous color scale for PC3 values.
   scale_color_viridis_c() +
   labs(
     x = "Principal Component 1",
@@ -438,18 +520,24 @@ The score plot displays the first two principal components, with color represent
 #| fig-width: 8
 #| fig-height: 4
 
+# Standardize clustering variables so all variables contribute on the same scale.
 cluster_scaled <- scale(cluster_df)
 
+# Set seed so k-means results are reproducible.
 set.seed(0827)
 
+# Create a list to store k-means fits for k = 1 through 8.
 k_list <- vector("list", 8)
 
+# Fit k-means models across candidate numbers of clusters.
 for(k in 1:8){
   k_list[[k]] <- kmeans(cluster_scaled, centers = k, nstart = 50)
 }
 
+# Extract total within-cluster sum of squares for the elbow plot.
 twcss <- sapply(k_list, function(x) x$tot.withinss)
 
+# Plot total within-cluster SS against the number of clusters.
 plot(1:8, twcss,
      type = "b",
      xlab = "Number of Clusters",
@@ -461,8 +549,10 @@ The elbow plot shows substantial reductions in within-cluster variation when inc
 ## Cluster Means
 
 ```{r}
+# Set seed so the final k-means solution is reproducible.
 set.seed(0827)
 
+# Fit the selected four-cluster k-means model.
 mlb_kmeans <- kmeans(
   cluster_scaled,
   centers = 4,
@@ -472,8 +562,10 @@ mlb_kmeans <- kmeans(
 ```
 
 ```{r}
+# Attach k-means cluster assignments to the original-scale variables and summarize each cluster.
 mlb_cluster_means <-
   mlb_clean %>%
+  # Select variables used to interpret cluster profiles.
   select(
     fantasy_points,
     last_start_fp,
@@ -482,12 +574,15 @@ mlb_cluster_means <-
     start_number
   ) %>%
   drop_na() %>%
+  # Add the k-means cluster label for each row.
   mutate(cluster = mlb_kmeans$cluster) %>%
+  # Average each variable within each cluster.
   group_by(cluster) %>%
   summarise(across(everything(), mean)) %>%
   rename(mean_fp = fantasy_points) %>%
   mutate(across(-cluster, ~round(., 3)))
 
+# Print the k-means cluster means table.
 kable(mlb_cluster_means, booktabs = TRUE) %>%
   kable_styling(latex_options = "hold_position", font_size = 11) %>%
   add_header_above(c("K-Means Cluster Means" = 6))
@@ -503,17 +598,23 @@ This identifies distinct groups of pitcher starts based on prior performance and
 #| fig-width: 6
 #| fig-height: 2.5
 
+# Set seed so the sampled subset is reproducible.
 set.seed(0827)
 
+# Sample 500 observations to make the hierarchical clustering dendrogram readable.
 sample_idx <- sample(nrow(cluster_scaled), 500)
+# Subset the scaled clustering data to the sampled rows.
 cluster_sample <- cluster_scaled[sample_idx, ]
 
+# Compute pairwise distances among sampled observations.
 dist_cluster <- dist(cluster_sample)
 
+# Fit hierarchical clustering using three linkage methods for comparison.
 hc_single   <- hclust(dist_cluster, method = "single")
 hc_complete <- hclust(dist_cluster, method = "complete")
 hc_average  <- hclust(dist_cluster, method = "average")
 
+# Display the three dendrograms side by side.
 par(mfrow = c(1,3))
 
 plot(hc_single,   main = "Single Linkage",   xlab = "", sub = "")
@@ -526,8 +627,10 @@ Hierarchical clustering was performed using single, complete, and average linkag
 ## Cluster Means
 
 ```{r}
+# Cut the complete-linkage dendrogram into four clusters.
 hc_clusters <- cutree(hc_complete, 4)
 
+# Attach hierarchical cluster assignments and summarize original-scale means.
 mlb_hc_means <-
   mlb_clean %>%
   select(
@@ -538,7 +641,9 @@ mlb_hc_means <-
     start_number
   ) %>%
   drop_na() %>%
+  # Keep the same sampled rows used to fit the dendrogram.
   slice(sample_idx) %>%
+  # Add the hierarchical cluster label.
   mutate(cluster = hc_clusters) %>%
   group_by(cluster) %>%
   summarise(across(everything(), mean)) %>%
@@ -547,6 +652,7 @@ mlb_hc_means <-
 ```
 
 ```{r}
+# Print the hierarchical cluster means table.
 kable(mlb_hc_means,
       booktabs = TRUE) %>%
   kable_styling(latex_options = "hold_position", font_size = 11) %>%
@@ -566,10 +672,13 @@ The k-means and hierarchical clustering solutions both identify groups of pitche
 #| fig-height: 2.25
 #| fig-align: center
 
+# Add k-means cluster labels to the PCA score data.
 cluster_scores <- as.data.frame(pca_fit$x) %>%
   mutate(cluster = factor(mlb_kmeans$cluster))
 
+# Plot the k-means clusters in the PC1-PC2 space.
 ggplot(cluster_scores, aes(x = PC1, y = PC2, color = cluster)) +
+  # Add one point for each pitcher start.
   geom_point(alpha = 0.5, size = 2.2) +
   labs(
     x = "Principal Component 1",
@@ -588,20 +697,28 @@ The k-means clusters are visualized using the first two principal components her
 # Random Forest
 
 ```{r}
+# Set seed so the train/test split is reproducible.
 set.seed(0827)
 
+# Randomly select 70% of rows for the training set.
 train <- sample(1:nrow(rf_df), floor(0.7 * nrow(rf_df)))
 
+# Create training data from the sampled row indices.
 train_data <- rf_df[train, ]
+# Create testing data from the remaining rows.
 test_data  <- rf_df[-train, ]
+# Store the observed test-set fantasy points for error calculations.
 test_y <- test_data$fantasy_points
 
+# Count the number of predictors for use in bagging/random forest mtry settings.
 p <- ncol(train_data) - 1
 ```
 
 ```{r}
+# Set seed so the random forest results are reproducible.
 set.seed(0827)
 
+# Fit a bagging model by using all predictors at each split.
 bag_fit <- randomForest(
   fantasy_points ~ .,
   data = train_data,
@@ -610,13 +727,19 @@ bag_fit <- randomForest(
   importance = TRUE
 )
 
+# Predict fantasy points on the test set using the bagging model.
 bag_pred <- predict(bag_fit, newdata = test_data)
+# Compute the test-set MSE for the bagging model.
 bag_mse <- mean((bag_pred - test_y)^2)
 
+# Define candidate mtry values for random forest tuning.
 mtry_vals <- 1:(p - 1)
+# Create storage for test-set MSE values.
 rf_mse_vals <- numeric(length(mtry_vals))
+# Create storage for the fitted random forest models.
 rf_fits <- vector("list", length(mtry_vals))
 
+# Fit and evaluate a random forest for each candidate mtry value.
 for (i in seq_along(mtry_vals)) {
   rf_fits[[i]] <- randomForest(
     fantasy_points ~ .,
@@ -626,7 +749,9 @@ for (i in seq_along(mtry_vals)) {
     importance = TRUE
   )
 
+  # Predict on the test set for the current model.
   rf_pred_i <- predict(rf_fits[[i]], newdata = test_data)
+  # Store the test-set MSE for the current mtry value.
   rf_mse_vals[i] <- mean((rf_pred_i - test_y)^2)
 }
 ```
@@ -634,15 +759,18 @@ for (i in seq_along(mtry_vals)) {
 ## Results
 
 ```{r}
+# Combine bagging and random forest test errors into one comparison table.
 results_tbl <- tibble(
   Model = c("Bagging", rep("Random Forest", length(mtry_vals))),
   mtry = c(p, mtry_vals),
   ntree = 500,
   Test_MSE = c(bag_mse, rf_mse_vals)
 ) %>%
+  # Sort so the best-performing model appears first.
   arrange(Test_MSE) %>%
   mutate(Test_MSE = round(Test_MSE, 3))
 
+# Print the model comparison table.
 kable(results_tbl, booktabs = TRUE) %>%
   kable_styling(latex_options = "hold_position", font_size = 11) %>%
   add_header_above(c("Model Comparison" = 4))
@@ -653,16 +781,21 @@ The random forest with mtry = 1 produced the lowest test-set mean squared error,
 ## Variable Importance
 
 ```{r}
+# Extract the best random forest mtry value from the model comparison table.
 best_mtry <- results_tbl %>%
   filter(Model == "Random Forest") %>%
   slice(1) %>%
   pull(mtry)
 
+# Pull the fitted random forest model corresponding to the best mtry value.
 rf_final <- rf_fits[[which(mtry_vals == best_mtry)]]
 
+# Convert the random forest importance output into a data frame.
 var_imp_tbl <- as.data.frame(importance(rf_final))
+# Preserve predictor names as their own column.
 var_imp_tbl$Predictor <- rownames(var_imp_tbl)
 
+# Format and sort the variable importance table.
 var_imp_tbl <- var_imp_tbl %>%
   as_tibble() %>%
   select(Predictor, `%IncMSE`, IncNodePurity) %>%
@@ -672,6 +805,7 @@ var_imp_tbl <- var_imp_tbl %>%
     IncNodePurity = round(IncNodePurity, 3)
   )
 
+# Print the variable importance table.
 kable(var_imp_tbl, booktabs = TRUE) %>%
   kable_styling(latex_options = "hold_position", font_size = 11) %>%
   add_header_above(c("Variable Importance" = 3))
@@ -685,13 +819,16 @@ Variable importance was assessed using percent increase in mean squared error. T
 #| fig-width: 6
 #| fig-height: 4
 
+# Generate test-set predictions from the final selected random forest model.
 final_pred <- predict(rf_final, newdata = test_data)
 
+# Plot predicted fantasy points against observed fantasy points.
 plot(
   final_pred, test_y,
   xlab = "Predicted Fantasy Points",
   ylab = "Observed Fantasy Points"
 )
+# Add a 45-degree reference line showing perfect prediction.
 abline(0, 1)
 ```
 
